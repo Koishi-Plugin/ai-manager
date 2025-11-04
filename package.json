@@ -1,0 +1,22 @@
+{
+  "name": "koishi-plugin-ai-manager",
+  "description": "基于人工智能的全自动群管，批量汇总消息并发送给模型分析，并对判定违规的消息自动进行处理",
+  "version": "0.0.1",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "license": "MIT",
+  "scripts": {},
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin"
+  ],
+  "devDependencies": {},
+  "peerDependencies": {
+    "koishi": "4.18.8"
+  }
+}
