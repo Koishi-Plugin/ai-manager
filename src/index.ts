@@ -1,6 +1,7 @@
 import { Context, Schema, h } from 'koishi'
 
 export const name = 'ai-manager'
+export const inject = ['database']
 export const usage = `
 <div style="border-radius: 10px; border: 1px solid #ddd; padding: 16px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
   <h2 style="margin-top: 0; color: #4a6ee0;">📌 插件说明</h2>
@@ -217,15 +218,20 @@ ${config.Rule}
         const candidates: string[] = [];
         const jsonBlockMatch = responseContent.match(/```json\s*([\s\S]*?)\s*```/i);
         if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
-        candidates.push(responseContent);
+        const firstBracket = responseContent.indexOf('[');
+        const lastBracket = responseContent.lastIndexOf(']');
+        if (firstBracket !== -1 && lastBracket > firstBracket) candidates.push(responseContent.substring(firstBracket, lastBracket + 1));
         const firstBrace = responseContent.indexOf('{');
         const lastBrace = responseContent.lastIndexOf('}');
         if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(responseContent.substring(firstBrace, lastBrace + 1));
+        candidates.push(responseContent);
         for (const candidate of [...new Set(candidates)]) {
-          try {
-            const parsed = JSON.parse(candidate);
-            return parsed.violations || [];
-          } catch (parseError) { /* 忽略解析错误 */ }
+            if (!candidate?.trim()) continue;
+            try {
+                const parsed: any = JSON.parse(candidate);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.violations)) return parsed.violations;
+                if (Array.isArray(parsed) && parsed.length > 0 && parsed[0] && Array.isArray(parsed[0].violations)) return parsed[0].violations;
+            } catch (parseError) {/* 忽略解析错误 */ }
         }
         ctx.logger.warn('原始响应:', JSON.stringify(response, null, 2));
         continue;
