@@ -131,26 +131,30 @@ export function apply(ctx: Context, config: Config) {
    * @description 发送给 AI 的系统提示词 (System Prompt)。
    * 它定义了 AI 的角色、任务、需要遵守的规则，以及输出的 JSON 格式。
    */
-  const SYSTEM_PROMPT = `你是一个专业的内容审查 AI。请分析用户提供的消息对象 JSON 数组，并根据以下规则识别违规行为。每条消息都包含了 channelId 字段，代表其来源频道。
+  const SYSTEM_PROMPT = `你是一个高级内容审查 AI，你的工作是精准且严格地执行规则。请分析用户提供的消息批次（一个 JSON 数组），并根据下方提供的“规则清单”识别所有违规行为。
 
-规则:
+**核心指令:**
+1.  **全局视角**: 你必须将整个消息批次视为一个整体。用户的行为，如“刷屏”或“频繁发广告”，需要通过分析其在该批次中的所有消息来判断。
+2.  **逐条审查**: 在得出结论前，请在你的思考中对每一条消息，都用每一条规则去仔细比对。一条消息可能违反多条规则。
+3.  **严格执行**: 不要进行主观臆断或放宽标准。严格按照规则描述和处罚建议进行判断。
+
+**输出格式要求:**
+你的回答**必须且只能**是一个包裹在 \`\`\`json ... \`\`\` 代码块中的 JSON **数组**。**绝对禁止**在该代码块前后添加任何解释、注释或额外文本。如果未发现任何违规行为，必须返回一个空数组 \`[]\`。
+
+输出格式规范 (直接返回数组):
+[
+  {
+    "messageId": "string", // 违规消息的 'id'
+    "userId": "string",    // 发送该消息用户的 'id'
+    "reason": "string",    // 对违规行为的简明扼要的解释
+    "mute": "number"       // (可选) 建议的禁言时长（秒）
+  }
+]
+
+**规则清单:**
 ---
 ${config.Rule}
----
-
-你的回答**必须且只能**是一个包裹在 \`\`\`json ... \`\`\` 代码块中的 JSON 对象，不包含任何解释性文字。该 JSON 对象必须符合以下格式规范，其中只包含一个键 "violations"，其值为一个违规对象的数组。如果没有发现违规行为，请返回一个空数组 \`"violations": []\`。
-
-输出格式规范:
-{
-  "violations": [
-    {
-      "messageId": "string", // 违规消息的 'id'
-      "userId": "string",    // 发送该消息用户的 'id'
-      "reason": "string",    // 对违规行为的简明扼要的解释
-      "mute": "number"       // (可选) 建议的禁言时长（秒）。仅在强烈建议禁言时才包含此字段
-    }
-  ]
-}`;
+---`;
 
   /**
    * @description 将 Koishi 的消息元素 (h 元素) 递归转换为标准化的 AiMessage JSON 对象。
@@ -221,17 +225,13 @@ ${config.Rule}
         const firstBracket = responseContent.indexOf('[');
         const lastBracket = responseContent.lastIndexOf(']');
         if (firstBracket !== -1 && lastBracket > firstBracket) candidates.push(responseContent.substring(firstBracket, lastBracket + 1));
-        const firstBrace = responseContent.indexOf('{');
-        const lastBrace = responseContent.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(responseContent.substring(firstBrace, lastBrace + 1));
         candidates.push(responseContent);
         for (const candidate of [...new Set(candidates)]) {
             if (!candidate?.trim()) continue;
             try {
                 const parsed: any = JSON.parse(candidate);
-                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.violations)) return parsed.violations;
-                if (Array.isArray(parsed) && parsed.length > 0 && parsed[0] && Array.isArray(parsed[0].violations)) return parsed[0].violations;
-            } catch (parseError) {/* 忽略解析错误 */ }
+                if (Array.isArray(parsed)) if (parsed.length === 0 || (parsed[0] && 'messageId' in parsed[0] && 'userId' in parsed[0] && 'reason' in parsed[0])) return parsed;
+            } catch (parseError) { /* 忽略解析错误，继续尝试下一个候选字符串 */ }
         }
         ctx.logger.warn('原始响应:', JSON.stringify(response, null, 2));
         continue;
@@ -270,7 +270,7 @@ ${config.Rule}
       if (config.Action.includes('mute') && violation.mute > 0) await bot.muteGuildMember(guildId, userId, violation.mute * 1000).catch(e => ctx.logger.warn(`禁言用户 [${userId}] 失败: ${e.message}`));
       if (config.Action.includes('forward')) {
         const headerText = `[${new Date(timestamp).toLocaleString('zh-CN')}] ${channelId}:${userId}\n原因: ${violation.reason}`;
-        const authorElement = h('author', { userId: userId, name: userName });
+        const authorElement = h('author', { id: userId, name: userName });
         const headerNode = h('message', {}, [authorElement, h.text(headerText)]);
         const messageNode = h('message', { timestamp: Math.floor(timestamp / 1000) }, [authorElement, ...h.parse(content)]);
         forwardElements.push(headerNode, messageNode);
