@@ -264,8 +264,9 @@ ${config.Rule}
       if (config.Action.includes('mute') && violation.mute > 0) await bot.muteGuildMember(guildId, userId, violation.mute * 1000).catch(e => ctx.logger.warn(`禁言用户 [${userId}] 失败: ${e.message}`));
       if (config.Action.includes('forward')) {
         const headerText = `[${new Date(timestamp).toLocaleString('zh-CN')}] ${channelId}:${userId}\n原因: ${violation.reason}`;
-        const headerNode = h('message', { userId, nickname: userName }, headerText);
-        const messageNode = h('message', { userId, nickname: userName, timestamp: Math.floor(timestamp / 1000) }, h.parse(content));
+        const authorElement = h('author', { userId: userId, name: userName });
+        const headerNode = h('message', {}, [authorElement, h.text(headerText)]);
+        const messageNode = h('message', { timestamp: Math.floor(timestamp / 1000) }, [authorElement, ...h.parse(content)]);
         forwardElements.push(headerNode, messageNode);
       }
     }
