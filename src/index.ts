@@ -95,6 +95,7 @@ export interface Config {
   ApiKey: string;
   Model: string;
   Rule: string;
+  Debug: boolean;
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -102,6 +103,7 @@ export const Config: Schema<Config> = Schema.intersect([
     Endpoint: Schema.string().required().description('端点 (Endpoint)'),
     ApiKey: Schema.string().role('secret').required().description('密钥 (Key)'),
     Model: Schema.string().description('模型 (Model)'),
+    Debug: Schema.boolean().default(false).description('调试模式'),
     Rule: Schema.string().role('textarea').description('检测规则'),
   }).description('模型配置'),
   Schema.object({
@@ -185,49 +187,55 @@ ${config.Rule}
 
   /**
    * @description 调用AI服务进行内容审查。
-   * 它将消息数组转换为指定的 JSON 格式，并向配置的 AI 端点发送请求。
    * @param {MessageInfo[]} messages - 待分析的 MessageInfo 对象数组。
    * @returns {Promise<Violation[]>} AI 识别出的 Violation 对象数组。如果请求失败或未发现违规，则返回空数组。
    */
   const callAI = async (messages: MessageInfo[]): Promise<Violation[]> => {
     if (messages.length === 0) return [];
     const aiMessages: AiMessage[] = messages.map(msg => hToAiMessage(msg.messageId, msg.channelId, msg.userId, msg.userName, h.parse(msg.content)));
-    try {
-      const response = await ctx.http.post<{ choices: { message: { content: string } }[] }>(
-        `${config.Endpoint.replace(/\/$/, '')}/chat/completions`,
-        {
-          model: config.Model,
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: JSON.stringify(aiMessages, null, 2) }
-          ],
-        },
-        {
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.ApiKey}` },
-          timeout: 600000
+    const maxRetries = 3;
+    let lastError: Error | null = null;
+    if (config.Debug) ctx.logger.info('准备请求模型:', JSON.stringify(aiMessages, null, 2));
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await ctx.http.post<{ choices: { message: { content: string } }[] }>(
+          `${config.Endpoint.replace(/\/$/, '')}/chat/completions`,
+          {
+            model: config.Model,
+            messages: [
+              { role: 'system', content: SYSTEM_PROMPT },
+              { role: 'user', content: JSON.stringify(aiMessages, null, 2) }
+            ],
+          },
+          {
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.ApiKey}` },
+            timeout: 600000
+          }
+        );
+        const responseContent: string = response?.choices?.[0]?.message?.content;
+        if (!responseContent?.trim()) return [];
+        const candidates: string[] = [];
+        const jsonBlockMatch = responseContent.match(/```json\s*([\s\S]*?)\s*```/i);
+        if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
+        candidates.push(responseContent);
+        const firstBrace = responseContent.indexOf('{');
+        const lastBrace = responseContent.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(responseContent.substring(firstBrace, lastBrace + 1));
+        for (const candidate of [...new Set(candidates)]) {
+          try {
+            const parsed = JSON.parse(candidate);
+            return parsed.violations || [];
+          } catch (parseError) { /* 忽略解析错误 */ }
         }
-      );
-      const responseContent: string = response?.choices?.[0]?.message?.content;
-      if (!responseContent?.trim()) return [];
-      const candidates: string[] = [];
-      const jsonBlockMatch = responseContent.match(/```json\s*([\s\S]*?)\s*```/i);
-      if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
-      candidates.push(responseContent);
-      const firstBrace = responseContent.indexOf('{');
-      const lastBrace = responseContent.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(responseContent.substring(firstBrace, lastBrace + 1));
-      for (const candidate of [...new Set(candidates)]) {
-        try {
-          const parsed = JSON.parse(candidate);
-          return parsed.violations || [];
-        } catch (parseError) { }
+        ctx.logger.warn('原始响应:', JSON.stringify(response, null, 2));
+        continue;
+      } catch (e) {
+        lastError = e;
+        if (attempt < maxRetries) await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
       }
-      ctx.logger.error('原始响应:', JSON.stringify(response, null, 2));
-      return [];
-    } catch (e) {
-      ctx.logger.error('解析失败:', e);
-      return [];
     }
+    ctx.logger.error('调用模型失败:', lastError);
+    return [];
   };
 
   /**
@@ -237,33 +245,27 @@ ${config.Rule}
    */
   const processViolations = async (violations: Violation[], originalMessages: MessageInfo[]) => {
     if (config.Action.length === 0 || violations.length === 0) return;
+    if (config.Debug) ctx.logger.info('模型返回:\n%s', JSON.stringify(violations, null, 2));
     const messageMap = new Map<string, MessageInfo>(originalMessages.map(msg => [msg.messageId, msg]));
     const forwardElements: h[] = [];
-
-    // 按原始消息的时间戳排序违规条目，确保转发顺序
     const sortedViolations = violations
       .map(v => ({ violation: v, msg: messageMap.get(v.messageId) }))
       .filter(item => !!item.msg)
       .sort((a, b) => a.msg.timestamp - b.msg.timestamp)
       .map(item => item.violation);
-
     for (const violation of sortedViolations) {
       const originalMessage = messageMap.get(violation.messageId);
-      // Double check, though filter should have handled this
       if (!originalMessage) continue;
-
       const { channelId, guildId, userId, userName, messageId, content, timestamp } = originalMessage;
       const [platform] = channelId.split(':', 1);
       const bot = ctx.bots.find(b => b.platform === platform);
       if (!bot) continue;
-
       if (config.Action.includes('recall')) await bot.deleteMessage(channelId, messageId).catch(e => ctx.logger.warn(`撤回消息 [${messageId}] 失败: ${e.message}`));
       if (config.Action.includes('mute') && violation.mute > 0) await bot.muteGuildMember(guildId, userId, violation.mute * 1000).catch(e => ctx.logger.warn(`禁言用户 [${userId}] 失败: ${e.message}`));
-
       if (config.Action.includes('forward')) {
-        const headerText = `${userName}(${channelId}-${userId})\n  - ${new Date(timestamp).toLocaleString('zh-CN')}`;
-        const headerNode = h('message', { userId: bot.selfId, nickname: 'AI Manager' }, h.parse(headerText));
-        const messageNode = h('message', { userId, nickname: userName }, h.parse(content));
+        const headerText = `[${new Date(timestamp).toLocaleString('zh-CN')}] ${channelId}:${userId}\n原因: ${violation.reason}`;
+        const headerNode = h('message', { userId, nickname: userName }, headerText);
+        const messageNode = h('message', { userId, nickname: userName, timestamp: Math.floor(timestamp / 1000) }, h.parse(content));
         forwardElements.push(headerNode, messageNode);
       }
     }
