@@ -1,6 +1,18 @@
 import { Context, Schema, h } from 'koishi'
 
 export const name = 'ai-manager'
+export const usage = `
+<div style="border-radius: 10px; border: 1px solid #ddd; padding: 16px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+  <h2 style="margin-top: 0; color: #4a6ee0;">📌 插件说明</h2>
+  <p>📖 <strong>使用文档</strong>：请点击左上角的 <strong>插件主页</strong> 查看插件使用文档</p>
+  <p>🔍 <strong>更多插件</strong>：可访问 <a href="https://github.com/YisRime" style="color:#4a6ee0;text-decoration:none;">苡淞的 GitHub</a> 查看本人的所有插件</p>
+</div>
+<div style="border-radius: 10px; border: 1px solid #ddd; padding: 16px; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+  <h2 style="margin-top: 0; color: #e0574a;">❤️ 支持与反馈</h2>
+  <p>🌟 喜欢这个插件？请在 <a href="https://github.com/YisRime" style="color:#e0574a;text-decoration:none;">GitHub</a> 上给我一个 Star！</p>
+  <p>🐛 遇到问题？请通过 <strong>Issues</strong> 提交反馈，或加入 QQ 群 <a href="https://qm.qq.com/q/PdLMx9Jowq" style="color:#e0574a;text-decoration:none;"><strong>855571375</strong></a> 进行交流</p>
+</div>
+`
 
 /**
  * @description 存储单条消息的核心信息，用于后续处理和分析。
@@ -123,7 +135,7 @@ export function apply(ctx: Context, config: Config) {
 ${config.Rule}
 ---
 
-你的回答必须是一个有效的 JSON 对象，其中只包含一个键 "violations"，其值为一个违规对象的数组。如果没有发现违规行为，请返回一个空数组。
+你的回答**必须且只能**是一个包裹在 \`\`\`json ... \`\`\` 代码块中的 JSON 对象，不包含任何解释性文字。该 JSON 对象必须符合以下格式规范，其中只包含一个键 "violations"，其值为一个违规对象的数组。如果没有发现违规行为，请返回一个空数组 \`"violations": []\`。
 
 输出格式规范:
 {
@@ -189,18 +201,31 @@ ${config.Rule}
             { role: 'system', content: SYSTEM_PROMPT },
             { role: 'user', content: JSON.stringify(aiMessages, null, 2) }
           ],
-          response_format: { type: "json_object" }
         },
         {
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.ApiKey}` },
           timeout: 600000
         }
       );
-      const responseContent = response?.choices?.[0]?.message?.content;
-      if (!responseContent) return [];
-      return JSON.parse(responseContent).violations || [];
+      const responseContent: string = response?.choices?.[0]?.message?.content;
+      if (!responseContent?.trim()) return [];
+      const candidates: string[] = [];
+      const jsonBlockMatch = responseContent.match(/```json\s*([\s\S]*?)\s*```/i);
+      if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
+      candidates.push(responseContent);
+      const firstBrace = responseContent.indexOf('{');
+      const lastBrace = responseContent.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(responseContent.substring(firstBrace, lastBrace + 1));
+      for (const candidate of [...new Set(candidates)]) {
+        try {
+          const parsed = JSON.parse(candidate);
+          return parsed.violations || [];
+        } catch (parseError) { }
+      }
+      ctx.logger.error('原始响应:', JSON.stringify(response, null, 2));
+      return [];
     } catch (e) {
-      ctx.logger.error('解析响应失败:', e);
+      ctx.logger.error('解析失败:', e);
       return [];
     }
   };
