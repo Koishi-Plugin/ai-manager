@@ -172,13 +172,18 @@ export function apply(ctx: Context, config: Config) {
       if (config.Action.includes('recall')) await bot.deleteMessage(msg.channelId, msg.messageId).catch(e => logger.warn(`撤回 [${msg.messageId}] 失败: ${e.message}`));
       if (config.Action.includes('mute') && violation.mute > 0) await bot.muteGuildMember(msg.guildId, msg.userId, violation.mute * 1000).catch(e => logger.warn(`禁言 [${msg.userId}] 失败: ${e.message}`));
       if (config.Action.includes('forward')) {
+        const author = h('author', { userId: msg.userId, name: msg.userName });
         const headerText = `时间: ${new Date(msg.timestamp).toLocaleString('zh-CN')}\n用户: ${msg.userName} (${msg.guildId}:${msg.userId})\n原因: ${violation.reason}`;
-        const headerNode = h('message', { userId: bot.selfId }, h.text(headerText));
-        const messageNode = h('message', { userId: msg.userId, nickname: msg.userName }, h.parse(msg.content));
+        const messageContent = h.parse(msg.content);
+        const headerNode = h('message', {}, [author, h.text(headerText)]);
+        const messageNode = h('message', {}, [author, ...messageContent]);
         forwardElements.push(headerNode, messageNode);
       }
     }
-    if (forwardElements.length > 0 && config.Target) await ctx.broadcast([config.Target], h('forward', {}, forwardElements)).catch(e => logger.error(`转发消息失败: ${e.message}`));
+    if (forwardElements.length > 0 && config.Target) {
+      const forwardMessage = h('message', { forward: true }, forwardElements);
+      await ctx.broadcast([config.Target], forwardMessage).catch(e => logger.error(`转发消息失败: ${e.message}`));
+    }
   };
 
   /**
