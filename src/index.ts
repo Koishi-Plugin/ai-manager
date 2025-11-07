@@ -115,7 +115,7 @@ export const Config: Schema<Config> = Schema.intersect([
     maxBatchSize: Schema.number().min(1).max(128).default(60).description('最多消息数量'),
     inactivityTimeout: Schema.number().min(5).max(600).default(60).description('最大静默超时'),
     maxBatchWaitTime: Schema.number().min(60).max(3600).default(300).description('连续消息超时'),
-    whitelist: Schema.array(String).default([]).description('白名单用户'),
+    whitelist: Schema.array(String).role('table').default(['2854196310']).description('白名单用户'),
   }).description('消息配置'),
 ])
 
