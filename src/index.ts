@@ -166,7 +166,7 @@ export function apply(ctx: Context, config: Config) {
       } catch (e) {
         attempt++;
         retryTime = Date.now() + 20000 + attempt * 10000;
-        logger.error(`请求失败:`, e);
+        logger.error(`第 ${attempt} 次请求失败: ${e}`);
       }
     }
   };
