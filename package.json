@@ -1,7 +1,7 @@
 {
   "name": "koishi-plugin-ai-manager",
   "description": "基于大语言模型的全自动群组消息审查，将消息汇总后发送至模型进行分析，并根据预设规则，自动对违规消息执行撤回或转发操作，或者对违规用户进行禁言。",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "contributors": [
     "Yis_Rime <yis_rime@outlook.com>"
   ],

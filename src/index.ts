@@ -101,6 +101,7 @@ export function apply(ctx: Context, config: Config) {
   let messageBatch: MessageInfo[] = [];
   let batchTimer: NodeJS.Timeout | null = null;
   let batchStartTime: number | null = null;
+  let retryTime = 0;
 
   /**
    * @const {string} SYSTEM_PROMPT
@@ -127,7 +128,13 @@ export function apply(ctx: Context, config: Config) {
       content: msg.content
     }));
     if (config.Debug) logger.info('请求模型:', JSON.stringify(aiPayload, null, 2));
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    let attempt = 0;
+    while (true) {
+      const now = Date.now();
+      if (now < retryTime) {
+        const waitTime = retryTime - now;
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
       try {
         const response = await ctx.http.post<{ choices: { message: { content: string } }[] }>(
           `${config.Endpoint.replace(/\/$/, '')}/chat/completions`,
@@ -138,17 +145,30 @@ export function apply(ctx: Context, config: Config) {
           { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.ApiKey}` }, timeout: 600000 }
         );
         const content = response?.choices?.[0]?.message?.content?.trim();
-        if (!content) continue;
-        const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
-        const source = jsonMatch?.[1] || content;
-        const parsed = JSON.parse(source);
-        if (Array.isArray(parsed)) return parsed as Violation[];
+        if (!content) throw new Error;
+        const potentialStrings = new Set<string>();
+        const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+        if (jsonBlockMatch?.[1]) potentialStrings.add(jsonBlockMatch[1]);
+        const firstBracket = content.indexOf('[');
+        const lastBracket = content.lastIndexOf(']');
+        if (firstBracket !== -1 && lastBracket > firstBracket) potentialStrings.add(content.substring(firstBracket, lastBracket + 1));
+        potentialStrings.add(content);
+        for (const jsonString of potentialStrings) {
+          try {
+            const parsed = JSON.parse(jsonString);
+            if (Array.isArray(parsed)) {
+              retryTime = 0;
+              return parsed as Violation[];
+            }
+          } catch (e) { /* 忽略解析错误 */ }
+        }
+        throw new Error;
       } catch (e) {
-        if (attempt === 3) logger.error('请求失败:', e);
-        else await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        attempt++;
+        retryTime = Date.now() + 20000 + attempt * 10000;
+        logger.error(`请求失败:`, e);
       }
     }
-    return [];
   };
 
   /**
