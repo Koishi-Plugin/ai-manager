@@ -23,6 +23,7 @@ export const usage = `
  * @property {string} guildId - 消息所在服务器/群组的唯一ID。
  * @property {string} messageId - 消息本身的唯一ID。
  * @property {string} content - 消息的原始内容 (Koishi的h元素字符串)。
+ * @property {h[]} elements - 消息的元素数组，用于精确转发所有类型的消息。
  * @property {number} timestamp - 消息发送时的Unix时间戳 (毫秒)。
  */
 interface MessageInfo {
@@ -32,6 +33,7 @@ interface MessageInfo {
   guildId: string;
   messageId: string;
   content: string;
+  elements: h[];
   timestamp: number;
 }
 
@@ -192,11 +194,10 @@ export function apply(ctx: Context, config: Config) {
       if (config.Action.includes('recall')) await bot.deleteMessage(msg.channelId, msg.messageId).catch(e => logger.warn(`撤回 [${msg.messageId}] 失败: ${e.message}`));
       if (config.Action.includes('mute') && violation.mute > 0) await bot.muteGuildMember(msg.guildId, msg.userId, violation.mute * 1000).catch(e => logger.warn(`禁言 [${msg.userId}] 失败: ${e.message}`));
       if (config.Action.includes('forward')) {
-        const author = h('author', { userId: msg.userId, name: msg.userName });
+        const author = h('author', { id: msg.userId, name: msg.userName });
         const headerText = `时间: ${new Date(msg.timestamp).toLocaleString('zh-CN')}\n用户: ${msg.userName} (${msg.guildId}:${msg.userId})\n原因: ${violation.reason}`;
-        const messageContent = h.parse(msg.content);
         const headerNode = h('message', {}, [author, h.text(headerText)]);
-        const messageNode = h('message', {}, [author, ...messageContent]);
+        const messageNode = h('message', {}, [author, ...msg.elements]);
         forwardElements.push(headerNode, messageNode);
       }
     }
@@ -234,6 +235,7 @@ export function apply(ctx: Context, config: Config) {
       guildId: session.guildId,
       messageId: session.messageId,
       content: session.content,
+      elements: session.elements,
       timestamp: Date.now(),
     });
     if (messageBatch.length >= config.maxBatchSize) {
