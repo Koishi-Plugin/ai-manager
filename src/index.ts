@@ -113,11 +113,15 @@ export function apply(ctx: Context, config: Config) {
    * @const {string} SYSTEM_PROMPT
    * @description 注入给 AI 的系统级提示（System Prompt），定义了 AI 的角色、任务和输入输出格式。
    */
-  const SYSTEM_PROMPT = `<role>你是一个高级内容审查AI。你的任务是精确、严格、高效地分析给定的消息，并仅以指定的JSON格式返回违规结果。</role>
-<instructions>1. 遵循列表规则: 你只需要按照下方 <rules> 标签内定义的规则列表进行分析审查。一条消息可能同时违反多条规则，请在 "reason" 字段中清晰说明。
-2. JSON格式输出: 你的回答必须且只能是一个包裹在 \`\`\`json ... \`\`\` 中的JSON数组。**绝对禁止**添加任何额外的文字。如果审查后未发现任何违规行为，必须返回一个空数组 \`[]\`。</instructions>
-<input_format>你将收到一个JSON数组，其中每个对象代表一条消息：[{ "id": "消息的唯一ID", "guildId": "群组ID", "userId": "用户ID", "content": "消息的内容" }]</input_format>
-<output_format>你必须返回一个JSON数组，其中每个对象代表一条违规记录：[{ "id": "违规消息的ID", "reason": "具体、清晰的违规原因", "mute": 禁言秒数 (可选, 必须为数字) }]</output_format>
+  const SYSTEM_PROMPT = `<role>你是一个具备高级上下文理解能力的内容审查AI。你的任务是精确、严格、高效地分析给定的对话片段，识别违反规则的行为，并仅以指定的JSON格式返回代表性的违规结果。</role>
+<instructions>
+1. 综合上下文进行分析: 你将收到的消息数组是按时间顺序排列的。你必须综合上下文来判断。特别注意识别由同一用户连续的多条消息所构成的违规，例如刷屏、骚扰、或逐渐升级的争吵，此外避免单一消息的误判。
+2. 返回代表性结果: 当一个用户的多条消息共同构成一种违规时（例如刷屏），你只需要选择其中最具代表性的一条或几条消息进行报告，而不是报告所有相关的消息。你的目标是减少冗余，精准定位问题行为的核心。
+3. 在原因中解释上下文: 在返回的 "reason" 字段中，必须清晰说明违规原因。如果判断基于多条消息的上下文，请明确指出，例如：“用户连续发布多条相似内容，构成刷屏”或“在对话中持续对他人进行人身攻击”。
+4. 严格的JSON输出: 你的回答必须是合法的JSON数组格式。绝对禁止在JSON内容之外添加任何解释、问候、思考或其他非JSON的内容，只需要输出一个JSON数组。如果未发现违规，必须返回空数组 \`[]\`。
+</instructions>
+<input_format>你将收到一个JSON数组，其中每个对象代表一条消息：[{ "id": "消息的唯一ID", "guildId": "群组ID", "userId": "用户ID", "content": "消息内容" }]</input_format>
+<output_format>你必须返回一个JSON数组，其中每个对象代表一条违规记录：[{ "id": "违规消息的ID", "reason": "违规原因", "mute": 禁言秒数 (可选, 必须为数字) }]</output_format>
 <rules>${config.Rule}</rules>`;
 
   /**
@@ -153,11 +157,17 @@ export function apply(ctx: Context, config: Config) {
         const content = response?.choices?.[0]?.message?.content?.trim();
         if (!content) throw new Error;
         const potentialStrings = new Set<string>();
-        const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+        const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
         if (jsonBlockMatch?.[1]) potentialStrings.add(jsonBlockMatch[1]);
+        const firstBrace = content.indexOf('{');
+        const lastBrace = content.lastIndexOf('}');
         const firstBracket = content.indexOf('[');
         const lastBracket = content.lastIndexOf(']');
-        if (firstBracket !== -1 && lastBracket > firstBracket) potentialStrings.add(content.substring(firstBracket, lastBracket + 1));
+        if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+          if (lastBrace > firstBrace) potentialStrings.add(content.substring(firstBrace, lastBrace + 1));
+        } else if (firstBracket !== -1) {
+          if (lastBracket > firstBracket) potentialStrings.add(content.substring(firstBracket, lastBracket + 1));
+        }
         potentialStrings.add(content);
         for (const jsonString of potentialStrings) {
           try {
@@ -172,7 +182,7 @@ export function apply(ctx: Context, config: Config) {
       } catch (e) {
         attempt++;
         retryTime = Date.now() + 20000 + attempt * 10000;
-        logger.error(`第 ${attempt} 次请求失败: ${e}`);
+        logger.error(`第 ${attempt} 次请求失败: ${e.message}`);
       }
     }
   };
