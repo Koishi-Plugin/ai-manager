@@ -56,9 +56,9 @@ interface Violation {
  * @description 插件的配置项接口。
  */
 export interface Config {
+  batchMode: boolean;
   maxBatchSize: number;
-  inactivityTimeout: number;
-  maxBatchWaitTime: number;
+  maxBatchTime: number;
   whitelist: string[];
   Action: ('recall' | 'mute' | 'forward')[];
   Target: string;
@@ -86,9 +86,9 @@ export const Config: Schema<Config> = Schema.intersect([
     Target: Schema.string().description('转发目标').default('onebot:123456789'),
   }).description('审查操作'),
   Schema.object({
+    batchMode: Schema.boolean().default(false).description('批量处理模式'),
     maxBatchSize: Schema.number().min(1).max(1024).default(128).description('最大消息数量'),
-    maxBatchWaitTime: Schema.number().min(60).max(3600).default(600).description('最大等待时间'),
-    inactivityTimeout: Schema.number().min(5).max(600).default(300).description('消息静默超时'),
+    maxBatchTime: Schema.number().min(10).max(3600).default(600).description('最大等待时间'),
     whitelist: Schema.array(String).role('table').default(['2854196310']).description('用户白名单'),
   }).description('消息配置'),
 ])
@@ -228,8 +228,7 @@ export function apply(ctx: Context, config: Config) {
    */
   ctx.middleware(async (session, next) => {
     if (session.isDirect || !session.guildId || session.author.isBot || config.whitelist.includes(session.userId) || session.cid === config.Target) return next();
-    if (messageBatch.length === 0) batchStartTime = Date.now();
-    messageBatch.push({
+    const currentMessage: MessageInfo = {
       userId: session.userId,
       userName: session.author.name || session.userId,
       channelId: session.cid,
@@ -238,33 +237,35 @@ export function apply(ctx: Context, config: Config) {
       content: session.content,
       elements: session.elements,
       timestamp: Date.now(),
-    });
-    if (messageBatch.length >= config.maxBatchSize) {
-      triggerAnalysis();
+    };
+    if (!config.batchMode) {
+      const messagesToAnalyze = [currentMessage];
+      const violations = await callAI(messagesToAnalyze);
+      if (violations.length > 0) await processViolations(violations, messagesToAnalyze);
+      return next();
+    } else {
+      if (messageBatch.length === 0) batchStartTime = Date.now();
+      messageBatch.push(currentMessage);
+      if (messageBatch.length >= config.maxBatchSize) {
+        await triggerAnalysis();
+        return next();
+      }
+      if (batchTimer) clearTimeout(batchTimer);
+      const timeSinceBatchStart = Date.now() - batchStartTime;
+      const maxWaitTimeRemaining = (config.maxBatchTime * 1000) - timeSinceBatchStart;
+      if (maxWaitTimeRemaining > 0) {
+        batchTimer = setTimeout(triggerAnalysis, maxWaitTimeRemaining);
+      } else {
+        await triggerAnalysis();
+      }
       return next();
     }
-
-    if (batchTimer) clearTimeout(batchTimer);
-    const timeSinceBatchStart = Date.now() - batchStartTime;
-    const maxWaitTimeRemaining = (config.maxBatchWaitTime * 1000) - timeSinceBatchStart;
-    const nextTimeout = Math.min(config.inactivityTimeout * 1000, maxWaitTimeRemaining);
-    if (nextTimeout > 0) {
-      batchTimer = setTimeout(triggerAnalysis, nextTimeout);
-    } else {
-      triggerAnalysis();
-    }
-    return next();
   });
 
   /**
    * 监听插件停用事件，确保在插件卸载前处理所有剩余的消息。
    */
   ctx.on('dispose', async () => {
-    if (batchTimer) clearTimeout(batchTimer);
-    if (messageBatch.length > 0) {
-      const messagesToAnalyze = [...messageBatch];
-      const violations = await callAI(messagesToAnalyze);
-      if (violations.length > 0) await processViolations(violations, messagesToAnalyze);
-    }
+    if (messageBatch.length > 0) await triggerAnalysis();
   });
 }
