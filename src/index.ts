@@ -89,9 +89,9 @@ export const Config: Schema<Config> = Schema.intersect([
     forwardRaw: Schema.boolean().default(false).description('显示原始文本'),
   }).description('审查操作'),
   Schema.object({
-    batchMode: Schema.boolean().default(false).description('批量处理模式'),
+    batchMode: Schema.boolean().default(false).description('即时模式'),
     maxBatchSize: Schema.number().min(1).max(1024).default(128).description('最大消息数量'),
-    maxBatchTime: Schema.number().min(10).max(3600).default(600).description('最大等待时间'),
+    maxBatchTime: Schema.number().min(10).max(3600).default(300).description('最大等待时间'),
     whitelist: Schema.array(String).role('table').default(['2854196310']).description('用户白名单'),
   }).description('消息配置'),
 ])
@@ -267,18 +267,13 @@ export function apply(ctx: Context, config: Config) {
       elements: session.elements,
       timestamp: Date.now(),
     };
-    if (!config.batchMode) {
-      const messagesToAnalyze = [currentMessage];
-      const violations = await callAI(messagesToAnalyze);
-      if (violations.length > 0) await processViolations(violations, messagesToAnalyze);
+    messageBatch.push(currentMessage);
+    if (messageBatch.length >= config.maxBatchSize) {
+      await triggerAnalysis();
       return next();
-    } else {
-      if (messageBatch.length === 0) batchStartTime = Date.now();
-      messageBatch.push(currentMessage);
-      if (messageBatch.length >= config.maxBatchSize) {
-        await triggerAnalysis();
-        return next();
-      }
+    }
+    if (config.batchMode) {
+      if (messageBatch.length === 1) batchStartTime = Date.now();
       if (batchTimer) clearTimeout(batchTimer);
       const timeSinceBatchStart = Date.now() - batchStartTime;
       const maxWaitTimeRemaining = (config.maxBatchTime * 1000) - timeSinceBatchStart;
@@ -287,8 +282,8 @@ export function apply(ctx: Context, config: Config) {
       } else {
         await triggerAnalysis();
       }
-      return next();
     }
+    return next();
   });
 
   /**
