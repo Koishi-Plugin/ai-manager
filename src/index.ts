@@ -1,4 +1,5 @@
 import { Context, Schema, h } from 'koishi'
+import { inspect } from 'util'
 
 export const name = 'ai-manager'
 export const reusable = true
@@ -62,6 +63,7 @@ export interface Config {
   whitelist: string[];
   Action: ('recall' | 'mute' | 'forward')[];
   Target: string;
+  forwardRaw: boolean;
   Endpoint: string;
   ApiKey: string;
   Model: string;
@@ -79,11 +81,12 @@ export const Config: Schema<Config> = Schema.intersect([
     ApiKey: Schema.string().role('secret').required().description('API 密钥 (Key)'),
     Model: Schema.string().description('模型 (Model)'),
     Rule: Schema.string().role('textarea').description('审查规则'),
-    Debug: Schema.boolean().default(false).description('调试模式'),
+    Debug: Schema.boolean().default(false).description('输出原始请求与响应'),
   }).description('模型配置'),
   Schema.object({
     Action: Schema.array(Schema.union(['recall', 'mute', 'forward'])).role('checkbox').description('执行操作'),
     Target: Schema.string().description('转发目标').default('onebot:123456789'),
+    forwardRaw: Schema.boolean().default(false).description('显示原始文本'),
   }).description('审查操作'),
   Schema.object({
     batchMode: Schema.boolean().default(false).description('批量处理模式'),
@@ -200,6 +203,22 @@ export function apply(ctx: Context, config: Config) {
         const headerNode = h('message', {}, [author, h.text(headerText)]);
         const messageNode = h('message', {}, [author, ...msg.elements]);
         forwardElements.push(headerNode, messageNode);
+        if (config.forwardRaw) {
+          const elements = msg.elements.map(element => {
+            if (element.type === 'json' && typeof element.attrs.data === 'string') {
+              try {
+                const parsedData = JSON.parse(element.attrs.data);
+                return { ...element, attrs: { ...element.attrs, data: parsedData } };
+              } catch (e) {
+                return { ...element, attrs: { ...element.attrs, data: `[JSON 解析失败: ${e.message}]` } };
+              }
+            }
+            return element;
+          });
+          const rawContent = `${inspect(elements, { depth: Infinity, colors: false })}`;
+          const rawTextNode = h('message', {}, [author, h.text(rawContent)]);
+          forwardElements.push(rawTextNode);
+        }
       }
     }
     if (forwardElements.length > 0 && config.Target) {
