@@ -290,6 +290,10 @@ export function apply(ctx: Context, config: Config) {
    * 监听插件停用事件，确保在插件卸载前处理所有剩余的消息。
    */
   ctx.on('dispose', async () => {
+    if (batchTimer) {
+      clearTimeout(batchTimer);
+      batchTimer = null;
+    }
     if (messageBatch.length > 0) await triggerAnalysis();
   });
 }
