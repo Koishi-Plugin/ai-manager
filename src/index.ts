@@ -119,7 +119,7 @@ export function apply(ctx: Context, config: Config) {
     if (config.Debug) logger.info('请求模型:', JSON.stringify(aiPayload, null, 2));
     let attempt = 0;
     let success = false;
-    while (!success) {
+    while (!success && attempt < 5) {
       if (Date.now() < retryTime) await new Promise(resolve => setTimeout(resolve, retryTime - Date.now()));
       try {
         const response = await ctx.http.post<{ choices: { message: { content: string } }[] }>(
