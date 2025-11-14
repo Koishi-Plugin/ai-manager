@@ -18,14 +18,7 @@ export const usage = `
 `
 
 /**
- * @description 存储单条消息的核心信息，用于后续处理和分析。
- * @property {string} userId - 发送消息用户的唯一ID。
- * @property {string} userName - 发送消息用户的昵称或名称。
- * @property {string} channelId - 消息所在频道的唯一ID (格式: platform:channelId)。
- * @property {string} guildId - 消息所在服务器/群组的唯一ID。
- * @property {string} messageId - 消息本身的唯一ID。
- * @property {h[]} elements - 消息的元素数组，用于精确转发所有类型的消息。
- * @property {number} timestamp - 消息发送时的Unix时间戳 (毫秒)。
+ * 存储单条消息的关键信息，用于后续处理。
  */
 interface MessageInfo {
   userId: string;
@@ -38,28 +31,24 @@ interface MessageInfo {
 }
 
 /**
- * @interface Violation
- * @description AI 服务返回的违规对象结构。
- * @property {string} id - 违规消息的ID。
- * @property {string} reason - 违规原因的文字说明。
- * @property {number} [mute] - (可选) 建议的禁言时长（秒）。
+ * 代表一个按用户和原因聚合的违规记录。
  */
-interface Violation {
-  id: string;
+interface ViolationGroup {
+  user: string;
   reason: string;
-  mute?: number;
+  action: number;
+  ids: string[];
 }
 
 /**
- * @interface Config
- * @description 插件的配置项接口。
+ * 插件的配置项接口。
  */
 export interface Config {
   batchMode: boolean;
   maxBatchSize: number;
   maxBatchTime: number;
   whitelist: string[];
-  Action: ('recall' | 'mute' | 'forward')[];
+  Action: ('recall' | 'mute' | 'forward' | 'kick')[];
   Target: string;
   forwardRaw: boolean;
   Endpoint: string;
@@ -69,10 +58,6 @@ export interface Config {
   Debug: boolean;
 }
 
-/**
- * @const Config
- * @description 插件配置的 Schema 定义。
- */
 export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     Endpoint: Schema.string().required().description('API 端点 (Endpoint)'),
@@ -82,7 +67,7 @@ export const Config: Schema<Config> = Schema.intersect([
     Debug: Schema.boolean().default(false).description('输出原始请求与响应'),
   }).description('模型配置'),
   Schema.object({
-    Action: Schema.array(Schema.union(['recall', 'mute', 'forward'])).role('checkbox').description('执行操作'),
+    Action: Schema.array(Schema.union(['recall', 'mute', 'forward', 'kick'])).role('select').description('执行操作'),
     Target: Schema.string().description('转发目标').default('onebot:123456789'),
     forwardRaw: Schema.boolean().default(false).description('显示原始文本'),
   }).description('审查操作'),
@@ -96,8 +81,8 @@ export const Config: Schema<Config> = Schema.intersect([
 
 /**
  * 插件的主应用函数。
- * @param ctx Koishi 的上下文对象。
- * @param config 用户配置。
+ * @param ctx - Koishi 的上下文对象。
+ * @param config - 插件的配置对象。
  */
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('ai-manager');
@@ -107,137 +92,20 @@ export function apply(ctx: Context, config: Config) {
   let batchStartTime: number | null = null;
   let retryTime = 0;
 
-  /**
-   * @const {string} SYSTEM_PROMPT
-   * @description 注入给 AI 的系统级提示（System Prompt），定义了 AI 的角色、任务和输入输出格式。
-   */
-  const SYSTEM_PROMPT = `<role>你是一个具备高级上下文理解能力的内容审查AI。你的任务是精确、严格、高效地分析给定的对话片段，识别违反规则的行为，并仅以指定的JSON格式返回代表性的违规结果。</role>
+  const SYSTEM_PROMPT = `<role>你是一个具备高级上下文理解能力的内容审查AI。你的任务是精确、严格、高效地分析给定的对话片段，识别违反规则的行为，并仅以指定的JSON格式返回违规结果。</role>
 <instructions>
 1. 综合上下文进行分析: 你将收到的消息数组是按时间顺序排列的。你必须综合上下文来判断。特别注意识别由同一用户连续的多条消息所构成的违规，例如刷屏、骚扰、或逐渐升级的争吵，此外避免单一消息的误判。
-2. 返回代表性结果: 当一个用户的多条消息共同构成一种违规时（例如刷屏），你只需要选择其中最具代表性的一条或几条消息进行报告，而不是报告所有相关的消息。你的目标是减少冗余，精准定位问题行为的核心。
+2. 返回所有相关结果: 当一个用户的多条消息共同构成一种违规时（例如刷屏），你必须在一个违规组中，通过 \`ids\` 字段报告所有相关的消息ID。你的目标是完整地记录构成违规行为的所有消息。
 3. 在原因中解释上下文: 在返回的 "reason" 字段中，必须清晰说明违规原因。如果判断基于多条消息的上下文，请明确指出，例如：“用户连续发布多条相似内容，构成刷屏”或“在对话中持续对他人进行人身攻击”。
 4. 严格的JSON输出: 你的回答必须是合法的JSON数组格式。绝对禁止在JSON内容之外添加任何解释、问候、思考或其他非JSON的内容，只需要输出一个JSON数组。如果未发现违规，必须返回空数组 \`[]\`。
 </instructions>
 <input_format>你将收到一个JSON数组，其中每个对象代表一条消息：[{ "id": "消息的唯一ID", "guildId": "群组ID", "userId": "用户ID", "content": "消息的元素化数组" }]</input_format>
-<output_format>你必须返回一个JSON数组，其中每个对象代表一条违规记录：[{ "id": "违规消息的ID", "reason": "违规原因", "mute": 禁言秒数 (可选, 必须为数字) }]</output_format>
+<output_format>你必须返回一个JSON数组，其中每个对象代表一个违规记录：[{ "user": "违规用户的ID", "reason": "违规原因", "action": 数字（正数代表禁言秒数，负数代表踢出）, "ids": ["相关消息的ID列表"] }]</output_format>
 <rules>${config.Rule}</rules>`;
 
   /**
-   * 调用 AI 模型进行内容审查。
-   * @param messages - 待审查的消息信息数组。
-   * @returns {Promise<Violation[]>} - 返回一个包含所有已识别违规行为的数组。
-   */
-  const callAI = async (messages: MessageInfo[]): Promise<Violation[]> => {
-    if (messages.length === 0) return [];
-    const aiPayload = messages.map(msg => ({
-      id: msg.messageId,
-      guildId: msg.guildId,
-      userId: msg.userId,
-      content: msg.elements
-    }));
-    if (config.Debug) logger.info('请求模型:', JSON.stringify(aiPayload, null, 2));
-    let attempt = 0;
-    while (true) {
-      const now = Date.now();
-      if (now < retryTime) {
-        const waitTime = retryTime - now;
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-      }
-      try {
-        const response = await ctx.http.post<{ choices: { message: { content: string } }[] }>(
-          `${config.Endpoint.replace(/\/$/, '')}/chat/completions`,
-          {
-            model: config.Model,
-            messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: JSON.stringify(aiPayload) }],
-          },
-          { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.ApiKey}` }, timeout: 600000 }
-        );
-        const content = response?.choices?.[0]?.message?.content?.trim();
-        if (!content) throw new Error;
-        const potentialStrings = new Set<string>();
-        const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
-        if (jsonBlockMatch?.[1]) potentialStrings.add(jsonBlockMatch[1]);
-        const firstBrace = content.indexOf('{');
-        const lastBrace = content.lastIndexOf('}');
-        const firstBracket = content.indexOf('[');
-        const lastBracket = content.lastIndexOf(']');
-        if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
-          if (lastBrace > firstBrace) potentialStrings.add(content.substring(firstBrace, lastBrace + 1));
-        } else if (firstBracket !== -1) {
-          if (lastBracket > firstBracket) potentialStrings.add(content.substring(firstBracket, lastBracket + 1));
-        }
-        potentialStrings.add(content);
-        for (const jsonString of potentialStrings) {
-          try {
-            const parsed = JSON.parse(jsonString);
-            if (Array.isArray(parsed)) {
-              retryTime = 0;
-              return parsed as Violation[];
-            }
-          } catch (e) { /* 忽略解析错误 */ }
-        }
-        throw new Error;
-      } catch (e) {
-        attempt++;
-        retryTime = Date.now() + 20000 + attempt * 10000;
-        logger.error(`第 ${attempt} 次请求失败: ${e.message}`);
-      }
-    }
-  };
-
-  /**
-   * 处理 AI 返回的违规信息，并执行相应的操作（撤回、禁言、转发）。
-   * @param violations - AI 返回的违规对象数组。
-   * @param originalMessages - 原始消息批次，用于查找违规消息的详细信息。
-   */
-  const processViolations = async (violations: Violation[], originalMessages: MessageInfo[]) => {
-    if (config.Action.length === 0 || violations.length === 0) return;
-    if (config.Debug) logger.info('模型返回:', JSON.stringify(violations, null, 2));
-    const messageMap = new Map<string, MessageInfo>(originalMessages.map(msg => [msg.messageId, msg]));
-    const forwardElements: h[] = [];
-    const sortedViolations = violations
-      .filter(v => messageMap.has(v.id))
-      .sort((a, b) => messageMap.get(a.id).timestamp - messageMap.get(b.id).timestamp);
-    for (const violation of sortedViolations) {
-      const msg = messageMap.get(violation.id);
-      const [platform] = msg.channelId.split(':', 1);
-      const bot = ctx.bots.find(b => b.platform === platform);
-      if (!bot) continue;
-      if (config.Action.includes('recall')) await bot.deleteMessage(msg.channelId, msg.messageId).catch(e => logger.warn(`撤回 [${msg.messageId}] 失败: ${e.message}`));
-      if (config.Action.includes('mute') && violation.mute > 0) await bot.muteGuildMember(msg.guildId, msg.userId, violation.mute * 1000).catch(e => logger.warn(`禁言 [${msg.userId}] 失败: ${e.message}`));
-      if (config.Action.includes('forward')) {
-        const author = h('author', { id: msg.userId, name: msg.userName });
-        const headerText = `时间: ${new Date(msg.timestamp).toLocaleString('zh-CN')}\n用户: ${msg.userName} (${msg.guildId}:${msg.userId})\n原因: ${violation.reason}`;
-        const headerNode = h('message', {}, [author, h.text(headerText)]);
-        const messageNode = h('message', {}, [author, ...msg.elements]);
-        forwardElements.push(headerNode, messageNode);
-        if (config.forwardRaw) {
-          const elements = msg.elements.map(element => {
-            if (element.type === 'json' && typeof element.attrs.data === 'string') {
-              try {
-                const parsedData = JSON.parse(element.attrs.data);
-                return { ...element, attrs: { ...element.attrs, data: parsedData } };
-              } catch (e) {
-                return { ...element, attrs: { ...element.attrs, data: `[JSON 解析失败: ${e.message}]` } };
-              }
-            }
-            return element;
-          });
-          const rawContent = `${inspect(elements, { depth: Infinity, colors: false })}`;
-          const rawTextNode = h('message', {}, [author, h.text(rawContent)]);
-          forwardElements.push(rawTextNode);
-        }
-      }
-    }
-    if (forwardElements.length > 0 && config.Target) {
-      const forwardMessage = h('message', { forward: true }, forwardElements);
-      await ctx.broadcast([config.Target], forwardMessage).catch(e => logger.error(`转发消息失败: ${e.message}`));
-    }
-  };
-
-  /**
-   * 触发消息批处理和分析。
-   * 此函数会清空现有计时器和状态，并处理当前消息队列中的所有消息。
+   * 触发对当前消息批次的完整分析流程。
+   * 包含：调用AI -> 解析结果 -> 执行惩罚 -> 转发通报
    */
   const triggerAnalysis = async () => {
     if (batchTimer) clearTimeout(batchTimer);
@@ -246,51 +114,118 @@ export function apply(ctx: Context, config: Config) {
     if (messageBatch.length === 0) return;
     const messagesToAnalyze = [...messageBatch];
     messageBatch = [];
-    const violations = await callAI(messagesToAnalyze);
-    if (violations.length > 0) await processViolations(violations, messagesToAnalyze);
+    let violations: ViolationGroup[] = [];
+    const aiPayload = messagesToAnalyze.map(msg => ({ id: msg.messageId, guildId: msg.guildId, userId: msg.userId, content: msg.elements }));
+    if (config.Debug) logger.info('请求模型:', JSON.stringify(aiPayload, null, 2));
+    let attempt = 0;
+    let success = false;
+    while (!success) {
+      if (Date.now() < retryTime) await new Promise(resolve => setTimeout(resolve, retryTime - Date.now()));
+      try {
+        const response = await ctx.http.post<{ choices: { message: { content: string } }[] }>(
+          `${config.Endpoint.replace(/\/$/, '')}/chat/completions`,
+          { model: config.Model, messages: [{ role: 'system', content: SYSTEM_PROMPT }, { role: 'user', content: JSON.stringify(aiPayload) }] },
+          { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.ApiKey}` }, timeout: 600000 }
+        );
+        const content = response?.choices?.[0]?.message?.content;
+        if (!content) throw new Error('No content in AI response');
+        const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+        const jsonString = jsonMatch ? jsonMatch[1].trim() : content.trim();
+        try {
+          const parsed = JSON.parse(jsonString);
+          if (Array.isArray(parsed)) violations = parsed as ViolationGroup[];
+        } catch {
+          const firstBracket = jsonString.indexOf('[');
+          const lastBracket = jsonString.lastIndexOf(']');
+          if (firstBracket !== -1 && lastBracket > firstBracket) {
+            try {
+              const parsed = JSON.parse(jsonString.substring(firstBracket, lastBracket + 1));
+              if (Array.isArray(parsed)) violations = parsed as ViolationGroup[];
+            } catch { /* 解析失败 */ }
+          }
+        }
+        if (violations) {
+          retryTime = 0;
+          success = true;
+          if (config.Debug) logger.info('模型返回:', JSON.stringify(violations, null, 2));
+        } else {
+           throw new Error;
+        }
+      } catch (e) {
+        attempt++;
+        retryTime = Date.now() + 20000 + attempt * 10000;
+        logger.error(`第 ${attempt} 次请求失败: ${e.message}`);
+      }
+    }
+    if (config.Action.length === 0 || violations.length === 0) return;
+    const messageMap = new Map<string, MessageInfo>(messagesToAnalyze.map(msg => [msg.messageId, msg]));
+    let allForwardElements: h[] = [];
+    for (const violation of violations) {
+      const firstValidMsgId = violation.ids.find(id => messageMap.has(id));
+      if (!firstValidMsgId) continue;
+      const representativeMsg = messageMap.get(firstValidMsgId);
+      const bot = ctx.bots.find(b => b.platform === representativeMsg.channelId.split(':', 1)[0]);
+      if (!bot) continue;
+      if (violation.action > 0 && config.Action.includes('mute')) {
+        await bot.muteGuildMember(representativeMsg.guildId, violation.user, violation.action * 1000).catch(e => logger.warn(`禁言 [${violation.user}] 失败: ${e.message}`));
+      } else if (violation.action < 0 && config.Action.includes('kick')) {
+        await bot.kickGuildMember(representativeMsg.guildId, violation.user).catch(e => logger.warn(`踢出 [${violation.user}] 失败: ${e.message}`));
+      }
+      if (config.Action.includes('recall')) {
+        for (const msgId of violation.ids) {
+          if (messageMap.has(msgId)) {
+            const msg = messageMap.get(msgId);
+            await bot.deleteMessage(msg.channelId, msg.messageId).catch(e => logger.warn(`撤回 [${msg.messageId}] 失败: ${e.message}`));
+          }
+        }
+      }
+      if (config.Action.includes('forward')) {
+        const author = h('author', { id: representativeMsg.userId, name: representativeMsg.userName });
+        allForwardElements.push(h('message', {}, [author, h.text(`时间: ${new Date(representativeMsg.timestamp).toLocaleString('zh-CN')}\n用户: ${representativeMsg.userName} (${representativeMsg.guildId}:${violation.user})\n原因: ${violation.reason}`)]));
+        const sortedMsgIds = violation.ids.filter(id => messageMap.has(id)).sort((a, b) => messageMap.get(a).timestamp - messageMap.get(b).timestamp);
+        for (const msgId of sortedMsgIds) {
+          const msg = messageMap.get(msgId);
+          allForwardElements.push(h('message', {}, [h('author', { id: msg.userId, name: msg.userName }), ...msg.elements]));
+          if (config.forwardRaw) {
+            allForwardElements.push(h('message', {}, [
+              author,
+              h.text(inspect(msg.elements.map(element => {
+                if (element.type === 'json' && typeof element.attrs.data === 'string') return { ...element, attrs: { ...element.attrs, data: JSON.parse(element.attrs.data) } };
+                return element;
+              }), { depth: Infinity, colors: false }))
+            ]));
+          }
+        }
+      }
+    }
+    if (allForwardElements.length > 0 && config.Target) await ctx.broadcast([config.Target], h('message', { forward: true }, allForwardElements)).catch(e => logger.error(`转发消息失败: ${e.message}`));
   };
 
   /**
-   * Koishi 中间件，用于捕获和处理消息。
+   * 中间件，用于捕获和批处理消息。
    */
   ctx.middleware(async (session, next) => {
     if (session.isDirect || !session.guildId || session.author.isBot || config.whitelist.includes(session.userId) || session.cid === config.Target) return next();
-    const currentMessage: MessageInfo = {
-      userId: session.userId,
-      userName: session.author.name || session.userId,
-      channelId: session.cid,
-      guildId: session.guildId,
-      messageId: session.messageId,
-      elements: session.elements,
-      timestamp: Date.now(),
-    };
-    messageBatch.push(currentMessage);
+    messageBatch.push({
+      userId: session.userId, userName: session.author.name ?? session.userId,
+      channelId: session.cid, guildId: session.guildId, messageId: session.messageId,
+      elements: session.elements, timestamp: Date.now(),
+    });
     if (messageBatch.length >= config.maxBatchSize) {
       await triggerAnalysis();
-      return next();
-    }
-    if (config.batchMode) {
+    } else if (config.batchMode) {
       if (messageBatch.length === 1) batchStartTime = Date.now();
       if (batchTimer) clearTimeout(batchTimer);
-      const timeSinceBatchStart = Date.now() - batchStartTime;
-      const maxWaitTimeRemaining = (config.maxBatchTime * 1000) - timeSinceBatchStart;
-      if (maxWaitTimeRemaining > 0) {
-        batchTimer = setTimeout(triggerAnalysis, maxWaitTimeRemaining);
-      } else {
-        await triggerAnalysis();
-      }
+      batchTimer = setTimeout(triggerAnalysis, Math.max(0, (config.maxBatchTime * 1000) - (Date.now() - batchStartTime)));
     }
     return next();
   });
 
   /**
-   * 监听插件停用事件，确保在插件卸载前处理所有剩余的消息。
+   * 在插件停用时，处理剩余的消息。
    */
   ctx.on('dispose', async () => {
-    if (batchTimer) {
-      clearTimeout(batchTimer);
-      batchTimer = null;
-    }
+    if (batchTimer) clearTimeout(batchTimer);
     if (messageBatch.length > 0) await triggerAnalysis();
   });
 }
