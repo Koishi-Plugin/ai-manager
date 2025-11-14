@@ -74,7 +74,7 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     batchMode: Schema.boolean().default(false).description('即时模式'),
     maxBatchSize: Schema.number().min(1).max(1024).default(128).description('最大消息数量'),
-    maxBatchTime: Schema.number().min(10).max(3600).default(300).description('最大等待时间'),
+    maxBatchTime: Schema.number().min(0).max(3600).default(300).description('最大等待时间'),
     whitelist: Schema.array(String).role('table').default(['2854196310']).description('用户白名单'),
   }).description('消息配置'),
 ])
@@ -94,13 +94,13 @@ export function apply(ctx: Context, config: Config) {
 
   const SYSTEM_PROMPT = `<role>你是一个具备高级上下文理解能力的内容审查AI。你的任务是精确、严格、高效地分析给定的对话片段，识别违反规则的行为，并仅以指定的JSON格式返回违规结果。</role>
 <instructions>
-1. 综合上下文进行分析: 你将收到的消息数组是按时间顺序排列的。你必须综合上下文来判断。特别注意识别由同一用户连续的多条消息所构成的违规，例如刷屏、骚扰、或逐渐升级的争吵，此外避免单一消息的误判。
+1. 综合上下文进行分析: 你将收到的消息数组是按时间顺序排列的。你必须综合上下文来判断。特别注意识别由同一用户连续的多条消息所构成的违规，例如刷屏、骚扰、或逐渐升级的争吵，此外避免误判。
 2. 返回所有相关结果: 当一个用户的多条消息共同构成一种违规时（例如刷屏），你必须在一个违规组中，通过 \`ids\` 字段报告所有相关的消息ID。你的目标是完整地记录构成违规行为的所有消息。
-3. 在原因中解释上下文: 在返回的 "reason" 字段中，必须清晰说明违规原因。如果判断基于多条消息的上下文，请明确指出，例如：“用户连续发布多条相似内容，构成刷屏”或“在对话中持续对他人进行人身攻击”。
+3. 说明原因与结果: 在返回的 "reason" 字段中，必须清晰说明违规原因。如果判断基于多条消息的上下文，请明确指出。此外，"action" 字段，必须反映出严重程度，正数代表禁言时长，负数代表踢出。
 4. 严格的JSON输出: 你的回答必须是合法的JSON数组格式。绝对禁止在JSON内容之外添加任何解释、问候、思考或其他非JSON的内容，只需要输出一个JSON数组。如果未发现违规，必须返回空数组 \`[]\`。
 </instructions>
 <input_format>你将收到一个JSON数组，其中每个对象代表一条消息：[{ "id": "消息的唯一ID", "guildId": "群组ID", "userId": "用户ID", "content": "消息的元素化数组" }]</input_format>
-<output_format>你必须返回一个JSON数组，其中每个对象代表一个违规记录：[{ "user": "违规用户的ID", "reason": "违规原因", "action": 数字（正数代表禁言秒数，负数代表踢出）, "ids": ["相关消息的ID列表"] }]</output_format>
+<output_format>你必须返回一个JSON数组，其中每个对象代表一个违规记录：[{ "user": "违规用户的ID", "reason": "违规原因", "action": 数字, "ids": ["相关的消息ID"] }]</output_format>
 <rules>${config.Rule}</rules>`;
 
   /**
@@ -211,7 +211,9 @@ export function apply(ctx: Context, config: Config) {
       channelId: session.cid, guildId: session.guildId, messageId: session.messageId,
       elements: session.elements, timestamp: Date.now(),
     });
-    if (messageBatch.length >= config.maxBatchSize) {
+    if (config.maxBatchTime === 0) {
+      await triggerAnalysis();
+    } else if (messageBatch.length >= config.maxBatchSize) {
       await triggerAnalysis();
     } else if (config.batchMode) {
       if (messageBatch.length === 1) batchStartTime = Date.now();
