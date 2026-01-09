@@ -154,7 +154,7 @@ export function apply(ctx: Context, config: Config) {
       } catch (e) {
         attempt++;
         retryTime = Date.now() + 20000 + attempt * 10000;
-        logger.error(`第 ${attempt} 次请求失败: ${e.message}`);
+        logger.error(`第 ${attempt} 次请求失败: ${e}`);
       }
     }
     if (config.Action.length === 0 || violations.length === 0) return;
