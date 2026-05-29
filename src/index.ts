@@ -48,6 +48,7 @@ export interface Config {
   maxBatchSize: number;
   maxBatchTime: number;
   whitelist: string[];
+  onlyText: boolean;
   Action: ('recall' | 'mute' | 'forward' | 'kick')[];
   Target: string;
   forwardRaw: boolean;
@@ -73,6 +74,7 @@ export const Config: Schema<Config> = Schema.intersect([
   }).description('审查操作'),
   Schema.object({
     batchMode: Schema.boolean().default(false).description('即时模式'),
+    onlyText: Schema.boolean().default(false).description('仅审查文字'),
     maxBatchSize: Schema.number().min(1).max(1024).default(128).description('最大消息数量'),
     maxBatchTime: Schema.number().min(0).max(3600).default(300).description('最大等待时间'),
     whitelist: Schema.array(String).role('table').default(['2854196310']).description('用户白名单'),
@@ -99,7 +101,7 @@ export function apply(ctx: Context, config: Config) {
 3. 说明原因与结果: 在返回的 "reason" 字段中，必须清晰说明违规原因。如果判断基于多条消息的上下文，请明确指出。此外，"action" 字段，必须反映出严重程度，正数代表禁言时长，负数代表踢出。
 4. 严格的JSON输出: 你的回答必须是合法的JSON数组格式。绝对禁止在JSON内容之外添加任何解释、问候、思考或其他非JSON的内容，只需要输出一个JSON数组。如果未发现违规，必须返回空数组 \`[]\`。
 </instructions>
-<input_format>你将收到一个JSON数组，其中每个对象代表一条消息：[{ "id": "消息的唯一ID", "guildId": "群组ID", "userId": "用户ID", "content": "消息的元素化数组" }]</input_format>
+<input_format>你将收到一个JSON数组，其中每个对象代表一条消息：[{ "id": "消息的唯一ID", "guildId": "群组ID", "userId": "用户ID", "content": "消息内容" }]</input_format>
 <output_format>你必须返回一个JSON数组，其中每个对象代表一个违规记录：[{ "user": "违规用户的ID", "reason": "违规原因", "action": 数字, "ids": ["相关的消息ID"] }]</output_format>
 <rules>${config.Rule}</rules>`;
 
@@ -115,7 +117,11 @@ export function apply(ctx: Context, config: Config) {
     const messagesToAnalyze = [...messageBatch];
     messageBatch = [];
     let violations: ViolationGroup[] = [];
-    const aiPayload = messagesToAnalyze.map(msg => ({ id: msg.messageId, guildId: msg.guildId, userId: msg.userId, content: msg.elements }));
+    const aiPayload = messagesToAnalyze.map(msg => {
+      let content: any = msg.elements;
+      if (config.onlyText) content = msg.elements.filter(e => e.type === 'text').map(e => e.attrs.content).join('');
+      return { id: msg.messageId, guildId: msg.guildId, userId: msg.userId, content };
+    });
     if (config.Debug) logger.info('请求模型:', JSON.stringify(aiPayload, null, 2));
     let attempt = 0;
     let success = false;
